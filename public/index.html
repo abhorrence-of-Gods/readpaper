@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ReadPaper</title>
+    <style>
+      html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+      .container { display: grid; grid-template-rows: auto 1fr auto; height: 100%; min-height: 0; }
+      .top { padding: 12px; border-bottom: 1px solid #ddd; display: flex; align-items: center; gap: 12px; }
+      .stage { display: grid; grid-template-columns: 120px 1fr 200px 120px; grid-template-rows: 1fr 1fr; gap: 16px; padding: 16px; min-height: 0; }
+      .stage > * { min-width: 0; min-height: 0; }
+      .panel { border: 2px solid #111; border-radius: 12px; display: flex; align-items: center; justify-content: center; padding: 16px; min-width: 0; min-height: 0; }
+      #explainPanel { grid-column: 2; grid-row: 2; }
+      .text-panel { font-size: clamp(18px, 5vw, 40px); white-space: pre-wrap; word-break: break-word; overflow: auto; text-align: center; }
+      .explain-panel { font-size: clamp(18px, 5vw, 36px); white-space: pre-wrap; word-break: break-word; overflow: auto; text-align: center; }
+      .btn { border: 2px solid #111; border-radius: 12px; background: #f9f9f9; cursor: pointer; font-size: clamp(32px, 6vw, 64px); display: flex; align-items: center; justify-content: center; user-select: none; }
+      .btn:active { transform: scale(0.98); }
+      .chunks { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #eee; flex-wrap: wrap; overflow-x: auto; }
+      .chunk-btn { padding: 8px 12px; border: 1px solid #111; border-radius: 8px; background: #fff; cursor: pointer; }
+      .chunk-btn.active { background: #111; color: #fff; }
+      .right-preview { font-size: clamp(11px, 2.5vw, 12px); padding: 8px; border: 2px solid #111; border-radius: 12px; overflow: auto; white-space: pre-wrap; word-break: break-word; align-self: stretch; justify-self: stretch; }
+      .hint { color: #666; font-size: 12px; }
+
+      /* Mobile layout */
+      @media (max-width: 768px) {
+        .top { flex-wrap: wrap; gap: 8px; }
+        /* add horizontal padding so fixed nav buttons don't overlap content; reserve bottom space for chunk bar */
+        .stage { grid-template-columns: 1fr; grid-template-rows: auto 1fr 24vh; padding-left: 64px; padding-right: 64px; padding-bottom: calc(88px + env(safe-area-inset-bottom)); }
+        #linePanel { grid-column: 1 !important; grid-row: 1 !important; min-height: 24vh; }
+        #explainPanel { grid-column: 1 !important; grid-row: 2 !important; min-height: 36vh; }
+        #preview { grid-column: 1 !important; grid-row: 3 !important; max-height: 24vh; }
+        /* Place big nav buttons on screen edges for easy tap */
+        #leftBtn, #rightBtn { position: fixed; top: 50%; transform: translateY(-50%); height: 40vh; width: 44px; z-index: 2; opacity: 0.9; background: rgba(249,249,249,0.7); backdrop-filter: blur(2px); }
+        #leftBtn { left: 6px; }
+        #rightBtn { right: 6px; }
+        .chunks { position: fixed; left: 0; right: 0; bottom: 0; background: #fff; padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); height: 64px; overflow-x: auto; overflow-y: hidden; flex-wrap: nowrap; align-items: center; z-index: 3; box-shadow: 0 -6px 12px rgba(0,0,0,0.06); }
+        .chunk-btn { min-width: 48px; height: 40px; display: inline-flex; align-items: center; justify-content: center; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="top">
+        <input id="file" type="file" accept="application/pdf" />
+        <label>区切り記号</label>
+        <input id="delimiter" value="<<<SEP>>>" style="width:140px" />
+        <label>1チャンク最大行数</label>
+        <input id="maxLines" type="number" value="20" style="width:80px" />
+        <span class="hint">PDFを選択 → チャンクを選択 → 右/左で行移動。矢印キー対応。</span>
+      </div>
+      <div class="stage">
+        <button id="leftBtn" class="btn">◀</button>
+        <div id="linePanel" class="panel text-panel">英文</div>
+        <div id="preview" class="right-preview"></div>
+        <button id="rightBtn" class="btn">▶</button>
+        <div style="grid-column: 2 / span 1; grid-row: 2;" id="explainPanel" class="panel explain-panel">解説</div>
+      </div>
+      <div id="chunks" class="chunks"></div>
+    </div>
+    <script type="module" src="/pdf.js"></script>
+    <script type="module">
+      import { getLinesFromPdf, chunkLines } from '/pdf.js';
+
+      const fileInput = document.getElementById('file');
+      const leftBtn = document.getElementById('leftBtn');
+      const rightBtn = document.getElementById('rightBtn');
+      const linePanel = document.getElementById('linePanel');
+      const explainPanel = document.getElementById('explainPanel');
+      const chunksBar = document.getElementById('chunks');
+      const preview = document.getElementById('preview');
+      const delimiterEl = document.getElementById('delimiter');
+      const maxLinesEl = document.getElementById('maxLines');
+
+      let allLines = [];
+      let chunks = [];
+      let selectedChunkIndex = 0;
+      let indexInChunk = 0;
+      let cache = new Map(); // key: `${chunkIndex}:${lineIndex}` -> explanation
+
+      function updatePreview() {
+        if (!chunks.length) { preview.textContent = ''; return; }
+        const lines = chunks[selectedChunkIndex];
+        preview.textContent = lines.map((l, i) => `${i + 1}. ${l}`).join('\n');
+      }
+
+      function renderChunksBar() {
+        chunksBar.innerHTML = '';
+        chunks.forEach((c, i) => {
+          const btn = document.createElement('button');
+          btn.className = 'chunk-btn' + (i === selectedChunkIndex ? ' active' : '');
+          btn.textContent = String(i + 1);
+          btn.addEventListener('click', () => { selectedChunkIndex = i; indexInChunk = 0; updatePreview(); setIndex(0); renderChunksBar(); });
+          chunksBar.appendChild(btn);
+        });
+      }
+
+      function key(chunkIdx, i) { return `${chunkIdx}:${i}`; }
+
+      function setIndex(i) {
+        if (!chunks.length) return;
+        const lines = chunks[selectedChunkIndex];
+        indexInChunk = Math.max(0, Math.min(lines.length - 1, i));
+        const text = lines[indexInChunk];
+        linePanel.textContent = text;
+
+        const k = key(selectedChunkIndex, indexInChunk);
+        if (cache.has(k)) {
+          explainPanel.textContent = cache.get(k);
+        } else {
+          explainPanel.textContent = '解説を取得中…';
+          fetch('/api/explain-batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chunkLines: lines,
+              startIndex: indexInChunk,
+              endIndex: indexInChunk,
+              delimiter: delimiterEl.value || '<<<SEP>>>'
+            })
+          }).then(r => r.json()).then(d => {
+            const exp = Array.isArray(d.explanations) ? d.explanations[0] || '' : '';
+            cache.set(k, exp);
+            if (key(selectedChunkIndex, indexInChunk) === k) {
+              explainPanel.textContent = exp;
+            }
+          }).catch(() => {
+            explainPanel.textContent = '取得に失敗しました';
+          });
+        }
+      }
+
+      leftBtn.addEventListener('click', () => setIndex(indexInChunk - 1));
+      rightBtn.addEventListener('click', () => setIndex(indexInChunk + 1));
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowLeft') setIndex(indexInChunk - 1);
+        if (e.key === 'ArrowRight') setIndex(indexInChunk + 1);
+      });
+
+      // Simple swipe navigation for touch devices
+      let touchStartX = null; let touchStartY = null; let touchStartTime = 0;
+      const SWIPE_THRESHOLD = 40; // px
+      const container = document.querySelector('.container');
+      container.addEventListener('touchstart', (e) => {
+        const t = e.touches[0];
+        touchStartX = t.clientX; touchStartY = t.clientY; touchStartTime = Date.now();
+      }, { passive: true });
+      container.addEventListener('touchend', (e) => {
+        if (touchStartX == null) return;
+        const t = e.changedTouches[0];
+        const dx = t.clientX - touchStartX; const dy = t.clientY - touchStartY; const dt = Date.now() - touchStartTime;
+        if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > SWIPE_THRESHOLD && dt < 600) {
+          if (dx < 0) setIndex(indexInChunk + 1); else setIndex(indexInChunk - 1);
+        }
+        touchStartX = touchStartY = null;
+      }, { passive: true });
+
+      fileInput.addEventListener('change', async () => {
+        const file = fileInput.files?.[0];
+        if (!file) return;
+        linePanel.textContent = '解析中…';
+        explainPanel.textContent = '';
+        preview.textContent = '';
+        cache = new Map();
+        try {
+          allLines = await getLinesFromPdf(file);
+          chunks = chunkLines(allLines, Number(maxLinesEl.value) || 20);
+          selectedChunkIndex = 0; indexInChunk = 0;
+          updatePreview(); renderChunksBar(); setIndex(0);
+        } catch (e) {
+          console.error(e);
+          const msg = (e && (e.message || e.toString())) || '不明なエラー';
+          linePanel.textContent = `エラー: ${msg}`;
+        }
+      });
+
+      function rechunkAndRefresh() {
+        if (!allLines.length) return;
+        cache = new Map();
+        chunks = chunkLines(allLines, Number(maxLinesEl.value) || 20);
+        selectedChunkIndex = 0;
+        indexInChunk = 0;
+        updatePreview();
+        renderChunksBar();
+        setIndex(0); // triggers fresh LLM call for the first line
+      }
+
+      maxLinesEl.addEventListener('change', rechunkAndRefresh);
+      maxLinesEl.addEventListener('input', rechunkAndRefresh);
+    </script>
+  </body>
+  </html>
+
+
