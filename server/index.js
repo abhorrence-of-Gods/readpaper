@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import OpenAI from 'openai';
+import fetch from 'node-fetch';
 
 dotenv.config();
 
@@ -17,6 +18,31 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 
 app.get('/health', (req, res) => {
   res.json({ ok: true, keyLoaded: Boolean(process.env.OPENAI_API_KEY), model: process.env.OPENAI_MODEL || 'gpt-5' });
+});
+
+// Fetch and parse webpage text into lines
+app.post('/api/fetch-url', async (req, res) => {
+  try {
+    const { url } = req.body || {};
+    if (!url || typeof url !== 'string') return res.status(400).json({ error: 'url required' });
+    const r = await fetch(url, { headers: { 'User-Agent': 'readpaper/1.0' } });
+    if (!r.ok) return res.status(502).json({ error: 'bad_gateway', status: r.status });
+    const html = await r.text();
+    const text = html
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const roughLines = text.split(/\n|(?<=[\.!?。！？])\s+/);
+    const lines = roughLines.map((s) => s.trim()).filter((s) => s.length > 0);
+    res.json({ lines });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'server_error' });
+  }
 });
 
 // Explains a contiguous range of lines within a chunk.

@@ -43,10 +43,14 @@
     <div class="container">
       <div class="top">
         <input id="file" type="file" accept="application/pdf" />
+        <input id="urlInput" type="url" placeholder="https://example.com/article" style="width:320px" />
+        <button id="loadUrl" class="chunk-btn">URL読込</button>
         <label>区切り記号</label>
         <input id="delimiter" value="<<<SEP>>>" style="width:140px" />
         <label>1チャンク最大行数</label>
         <input id="maxLines" type="number" value="20" style="width:80px" />
+        <label>表示行数</label>
+        <input id="pageSize" type="number" min="1" value="1" style="width:64px" />
         <span class="hint">PDFを選択 → チャンクを選択 → 右/左で行移動。矢印キー対応。</span>
       </div>
       <div class="stage">
@@ -70,6 +74,9 @@
       const chunksBar = document.getElementById('chunks');
       const preview = document.getElementById('preview');
       const delimiterEl = document.getElementById('delimiter');
+      const urlInput = document.getElementById('urlInput');
+      const loadUrlBtn = document.getElementById('loadUrl');
+      const pageSizeEl = document.getElementById('pageSize');
       const maxLinesEl = document.getElementById('maxLines');
 
       let allLines = [];
@@ -96,45 +103,75 @@
       }
 
       function key(chunkIdx, i) { return `${chunkIdx}:${i}`; }
+      function getPageSize(){ const n = Number(pageSizeEl.value); return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1; }
 
       function setIndex(i) {
         if (!chunks.length) return;
         const lines = chunks[selectedChunkIndex];
-        indexInChunk = Math.max(0, Math.min(lines.length - 1, i));
-        const text = lines[indexInChunk];
-        linePanel.textContent = text;
+        const page = getPageSize();
+        const maxStart = Math.max(0, lines.length - page);
+        indexInChunk = Math.max(0, Math.min(maxStart, i));
 
-        const k = key(selectedChunkIndex, indexInChunk);
-        if (cache.has(k)) {
-          explainPanel.textContent = cache.get(k);
-        } else {
-          explainPanel.textContent = '解説を取得中…';
-          fetch('/api/explain-batch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chunkLines: lines,
-              startIndex: indexInChunk,
-              endIndex: indexInChunk,
-              delimiter: delimiterEl.value || '<<<SEP>>>'
-            })
-          }).then(r => r.json()).then(d => {
-            const exp = Array.isArray(d.explanations) ? d.explanations[0] || '' : '';
-            cache.set(k, exp);
-            if (key(selectedChunkIndex, indexInChunk) === k) {
-              explainPanel.textContent = exp;
-            }
-          }).catch(() => {
-            explainPanel.textContent = '取得に失敗しました';
-          });
+        const start = indexInChunk;
+        const end = Math.min(lines.length - 1, start + page - 1);
+        const windowLines = lines.slice(start, end + 1);
+        linePanel.textContent = windowLines.join('\n');
+
+        // Compose explanation from cache if available
+        const cached = [];
+        let allCached = true;
+        for (let j = start; j <= end; j++) {
+          const kj = key(selectedChunkIndex, j);
+          const v = cache.get(kj);
+          if (typeof v === 'string' && v.length > 0) {
+            cached.push(v);
+          } else {
+            allCached = false;
+            cached.push('');
+          }
         }
+        if (allCached) {
+          explainPanel.textContent = cached.join('\n');
+          return;
+        }
+        explainPanel.textContent = '解説を取得中…';
+        fetch('/api/explain-batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chunkLines: lines,
+            startIndex: start,
+            endIndex: end,
+            delimiter: delimiterEl.value || '<<<SEP>>>'
+          })
+        }).then(r => r.json()).then(d => {
+          const arr = Array.isArray(d.explanations) ? d.explanations : [];
+          for (let j = start; j <= end; j++) {
+            const kj = key(selectedChunkIndex, j);
+            const idx = j - start;
+            cache.set(kj, arr[idx] || '');
+          }
+          // If still on same window, render
+          const curPage = getPageSize();
+          const curMaxStart = Math.max(0, lines.length - curPage);
+          const curStart = Math.max(0, Math.min(curMaxStart, indexInChunk));
+          if (curStart === start) {
+            const out = [];
+            for (let j = start; j <= end; j++) {
+              out.push(cache.get(key(selectedChunkIndex, j)) || '');
+            }
+            explainPanel.textContent = out.join('\n');
+          }
+        }).catch(() => {
+          explainPanel.textContent = '取得に失敗しました';
+        });
       }
 
-      leftBtn.addEventListener('click', () => setIndex(indexInChunk - 1));
-      rightBtn.addEventListener('click', () => setIndex(indexInChunk + 1));
+      leftBtn.addEventListener('click', () => setIndex(indexInChunk - getPageSize()));
+      rightBtn.addEventListener('click', () => setIndex(indexInChunk + getPageSize()));
       document.addEventListener('keydown', (e) => {
-        if (e.key === 'ArrowLeft') setIndex(indexInChunk - 1);
-        if (e.key === 'ArrowRight') setIndex(indexInChunk + 1);
+        if (e.key === 'ArrowLeft') setIndex(indexInChunk - getPageSize());
+        if (e.key === 'ArrowRight') setIndex(indexInChunk + getPageSize());
       });
 
       // Simple swipe navigation for touch devices
@@ -174,6 +211,27 @@
         }
       });
 
+      loadUrlBtn.addEventListener('click', async () => {
+        const url = (urlInput.value || '').trim();
+        if (!url) return;
+        linePanel.textContent = 'URL取得中…';
+        explainPanel.textContent = '';
+        preview.textContent = '';
+        cache = new Map();
+        try {
+          const r = await fetch('/api/fetch-url', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) });
+          const d = await r.json();
+          if (!r.ok) throw new Error(d?.error || 'failed');
+          allLines = d.lines || [];
+          chunks = chunkLines(allLines, Number(maxLinesEl.value) || 20);
+          selectedChunkIndex = 0; indexInChunk = 0;
+          updatePreview(); renderChunksBar(); setIndex(0);
+        } catch (e) {
+          console.error(e);
+          linePanel.textContent = `エラー: ${(e && (e.message || e.toString())) || '不明なエラー'}`;
+        }
+      });
+
       function rechunkAndRefresh() {
         if (!allLines.length) return;
         cache = new Map();
@@ -187,6 +245,8 @@
 
       maxLinesEl.addEventListener('change', rechunkAndRefresh);
       maxLinesEl.addEventListener('input', rechunkAndRefresh);
+      pageSizeEl.addEventListener('change', () => setIndex(indexInChunk));
+      pageSizeEl.addEventListener('input', () => setIndex(indexInChunk));
     </script>
   </body>
   </html>
