@@ -25,6 +25,9 @@
       /* Mobile layout */
       @media (max-width: 768px) {
         .top { flex-wrap: wrap; gap: 8px; }
+        .top input, .top button { min-height: 40px; }
+        #urlInput { width: 100%; }
+        #loadUrl { width: 100%; }
         /* add horizontal padding so fixed nav buttons don't overlap content; reserve bottom space for chunk bar */
         .stage { grid-template-columns: 1fr; grid-template-rows: auto 1fr 24vh; padding-left: 64px; padding-right: 64px; padding-bottom: calc(88px + env(safe-area-inset-bottom)); }
         #linePanel { grid-column: 1 !important; grid-row: 1 !important; min-height: 24vh; }
@@ -187,7 +190,8 @@
         const t = e.changedTouches[0];
         const dx = t.clientX - touchStartX; const dy = t.clientY - touchStartY; const dt = Date.now() - touchStartTime;
         if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > SWIPE_THRESHOLD && dt < 600) {
-          if (dx < 0) setIndex(indexInChunk + 1); else setIndex(indexInChunk - 1);
+          const step = getPageSize();
+          if (dx < 0) setIndex(indexInChunk + step); else setIndex(indexInChunk - step);
         }
         touchStartX = touchStartY = null;
       }, { passive: true });
